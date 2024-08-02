@@ -32,6 +32,11 @@ func main() {
 		TaskQueue: "mutex",
 	}
 
+	workflow3Options := client.StartWorkflowOptions{
+		ID:        "SampleWorkflow3WithMutex_" + uuid.New(),
+		TaskQueue: "mutex",
+	}
+
 	we, err := c.ExecuteWorkflow(context.Background(), workflow1Options, mutex.SampleWorkflowWithMutex, resourceID)
 	if err != nil {
 		log.Fatalln("Unable to execute workflow1", err)
@@ -44,5 +49,12 @@ func main() {
 		log.Fatalln("Unable to execute workflow2", err)
 	} else {
 		log.Println("Started workflow2", "WorkflowID", we.GetID(), "RunID", we.GetRunID())
+	}
+
+	we, err = c.ExecuteWorkflow(context.Background(), workflow3Options, mutex.SampleWorkflowWithMutex, resourceID)
+	if err != nil {
+		log.Fatalln("Unable to execute workflow3", err)
+	} else {
+		log.Println("Started workflow3", "WorkflowID", we.GetID(), "RunID", we.GetRunID())
 	}
 }
