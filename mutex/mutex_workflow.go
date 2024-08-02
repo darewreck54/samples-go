@@ -41,6 +41,35 @@ func NewMutex(currentWorkflowID string, lockNamespace string) *Mutex {
 	}
 }
 
+func (s *Mutex) LockWithCancellation(ctx workflow.Context,
+	resourceID string, unlockTimeout time.Duration) (UnlockFunc, error) {
+
+	activityCtx := workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{
+		ScheduleToCloseTimeout: time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    time.Second,
+			BackoffCoefficient: 2.0,
+			MaximumInterval:    time.Minute,
+			MaximumAttempts:    5,
+		},
+	})
+
+	var releaseLockChannelName string
+	var execution workflow.Execution
+	err := workflow.ExecuteLocalActivity(activityCtx, SignalWithStartMutexWorkflowActivity, s.lockNamespace,
+		resourceID, s.currentWorkflowID, unlockTimeout).Get(ctx, &execution)
+	if err != nil {
+		return nil, err
+	}
+	workflow.GetSignalChannel(ctx, AcquireLockSignalName).Receive(ctx, &releaseLockChannelName)
+
+	unlockFunc := func() error {
+		return workflow.SignalExternalWorkflow(ctx, execution.ID, execution.RunID,
+			releaseLockChannelName, "releaseLock").Get(ctx, nil)
+	}
+	return unlockFunc, nil
+}
+
 // Lock - locks mutex
 func (s *Mutex) Lock(ctx workflow.Context,
 	resourceID string, unlockTimeout time.Duration) (UnlockFunc, error) {
@@ -71,6 +100,89 @@ func (s *Mutex) Lock(ctx workflow.Context,
 			releaseLockChannelName, "releaseLock").Get(ctx, nil)
 	}
 	return unlockFunc, nil
+}
+
+func MutexWorkflowWithCancellation(
+	ctx workflow.Context,
+	namespace string,
+	resourceID string,
+	unlockTimeout time.Duration,
+) error {
+	currentWorkflowID := workflow.GetInfo(ctx).WorkflowExecution.ID
+	if currentWorkflowID == "default-test-workflow-id" {
+		// unit testing hack, see https://github.com/uber-go/cadence-client/issues/663
+		_ = workflow.Sleep(ctx, 10*time.Millisecond)
+	}
+	logger := workflow.GetLogger(ctx)
+	logger.Info("started", "currentWorkflowID", currentWorkflowID)
+	requestLockCh := workflow.GetSignalChannel(ctx, RequestLockSignalName)
+	locked := false
+	goroutineCount := 0
+	for {
+		var senderWorkflowID string
+		if !requestLockCh.ReceiveAsync(&senderWorkflowID) {
+			logger.Info("no more signals")
+			break
+		}
+
+		goroutineCount++
+		workflow.Go(ctx, func(ctx workflow.Context) {
+			if locked {
+				logger.Info("cancel", "senderWorkflowID", senderWorkflowID)
+				cancelSender(ctx, senderWorkflowID)
+			} else {
+				logger.Info("tryLock", "senderWorkflowID", senderWorkflowID)
+				locked = true
+				tryLock(ctx, senderWorkflowID, unlockTimeout)
+				locked = false
+			}
+			goroutineCount--
+		})
+	}
+
+	// when mutex can exit
+	logger.Info("Start go routines")
+	workflow.Await(ctx, func() bool {
+		return goroutineCount == 0
+	})
+	return nil
+}
+
+func cancelSender(ctx workflow.Context, senderWorkflowID string) {
+	logger := workflow.GetLogger(ctx)
+	future := workflow.RequestCancelExternalWorkflow(ctx, senderWorkflowID, "")
+	err := future.Get(ctx, nil)
+	if err != nil {
+		logger.Info("CancelExternalWorkflow error", "Error", err)
+		return
+	} else {
+		logger.Info(fmt.Sprintf("Request to cancel workflow: [%s]", senderWorkflowID))
+	}
+}
+
+func tryLock(ctx workflow.Context, senderWorkflowID string, unlockTimeout time.Duration) {
+	logger := workflow.GetLogger(ctx)
+	var releaseLockChannelName string
+	_ = workflow.SideEffect(ctx, func(ctx workflow.Context) interface{} {
+		return generateUnlockChannelName(senderWorkflowID)
+	}).Get(&releaseLockChannelName)
+	logger.Info("generated release lock channel name", "releaseLockChannelName", releaseLockChannelName)
+	// Send release lock channel name back to a senderWorkflowID, so that it can
+	// release the lock using release lock channel name
+	err := workflow.SignalExternalWorkflow(ctx, senderWorkflowID, "",
+		AcquireLockSignalName, releaseLockChannelName).Get(ctx, nil)
+	if err != nil {
+		// .Get(ctx, nil) blocks until the signal is sent.
+		// If the senderWorkflowID is closed (terminated/canceled/timeouted/completed/etc), this would return error.
+		// In this case we release the lock immediately instead of failing the mutex workflow.
+		// Mutex workflow failing would lead to all workflows that have sent requestLock will be waiting.
+		logger.Info("SignalExternalWorkflow error", "Error", err)
+		return
+	}
+	logger.Info("signaled external workflow")
+	var ack string
+	workflow.GetSignalChannel(ctx, releaseLockChannelName).ReceiveWithTimeout(ctx, unlockTimeout, &ack)
+	logger.Info("release signal received: " + ack)
 }
 
 // MutexWorkflow used for locking a resource
@@ -154,7 +266,7 @@ func SignalWithStartMutexWorkflowActivity(
 	}
 	wr, err := c.SignalWithStartWorkflow(
 		ctx, workflowID, RequestLockSignalName, senderWorkflowID,
-		workflowOptions, MutexWorkflow, namespace, resourceID, unlockTimeout)
+		workflowOptions, MutexWorkflowWithCancellation, namespace, resourceID, unlockTimeout)
 
 	if err != nil {
 		activity.GetLogger(ctx).Error("Unable to signal with start workflow", "Error", err)
@@ -192,20 +304,20 @@ func SampleWorkflowWithMutex(
 	ctx workflow.Context,
 	resourceID string,
 ) error {
+
 	currentWorkflowID := workflow.GetInfo(ctx).WorkflowExecution.ID
 	logger := workflow.GetLogger(ctx)
 	logger.Info("started", "currentWorkflowID", currentWorkflowID, "resourceID", resourceID)
 
 	mutex := NewMutex(currentWorkflowID, "TestUseCase")
-	unlockFunc, err := mutex.Lock(ctx, resourceID, 10*time.Minute)
+	unlockFunc, err := mutex.LockWithCancellation(ctx, resourceID, 10*time.Minute)
 	if err != nil {
 		return err
 	}
-	logger.Info("resource locked")
 
 	// emulate long running process
 	logger.Info("critical operation started")
-	_ = workflow.Sleep(ctx, 10*time.Second)
+	_ = workflow.Sleep(ctx, 10*time.Minute)
 	logger.Info("critical operation finished")
 
 	_ = unlockFunc()
