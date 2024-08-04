@@ -61,13 +61,28 @@ func (s *Mutex) LockWithCancellation(ctx workflow.Context,
 	if err != nil {
 		return nil, err
 	}
-	workflow.GetSignalChannel(ctx, AcquireLockSignalName).Receive(ctx, &releaseLockChannelName)
 
-	unlockFunc := func() error {
-		return workflow.SignalExternalWorkflow(ctx, execution.ID, execution.RunID,
-			releaseLockChannelName, "releaseLock").Get(ctx, nil)
+	isCanceled := false
+	selector := workflow.NewSelector(ctx)
+	selector.AddReceive(workflow.GetSignalChannel(ctx, AcquireLockSignalName), func(c workflow.ReceiveChannel, more bool) {
+		c.Receive(ctx, &releaseLockChannelName)
+		workflow.GetLogger(ctx).Info("acquire lock", "lockName", releaseLockChannelName)
+	})
+	selector.AddReceive(ctx.Done(), func(c workflow.ReceiveChannel, more bool) {
+		isCanceled = true
+		workflow.GetLogger(ctx).Info("recieved cancel")
+	})
+	selector.Select(ctx)
+
+	if !isCanceled {
+		unlockFunc := func() error {
+			return workflow.SignalExternalWorkflow(ctx, execution.ID, execution.RunID,
+				releaseLockChannelName, "releaseLock").Get(ctx, nil)
+		}
+		return unlockFunc, nil
 	}
-	return unlockFunc, nil
+
+	return nil, nil
 }
 
 // Lock - locks mutex
@@ -118,32 +133,46 @@ func MutexWorkflowWithCancellation(
 	requestLockCh := workflow.GetSignalChannel(ctx, RequestLockSignalName)
 	locked := false
 	goroutineCount := 0
+	var queuedWorkerId string
+
 	for {
 		var senderWorkflowID string
+
 		if !requestLockCh.ReceiveAsync(&senderWorkflowID) {
 			logger.Info("no more signals")
 			break
+		} else {
+			logger.Info(fmt.Sprintf("request lock: [%s]", senderWorkflowID))
 		}
 
 		goroutineCount++
 		workflow.Go(ctx, func(ctx workflow.Context) {
 			if locked {
-				logger.Info("cancel", "senderWorkflowID", senderWorkflowID)
-				cancelSender(ctx, senderWorkflowID)
+				logger.Info(fmt.Sprintf("lock request for [%s] w/ queuedWorkerId: [%s]", senderWorkflowID,
+					queuedWorkerId))
+				if queuedWorkerId != "" {
+					idCancel := queuedWorkerId
+					queuedWorkerId = senderWorkflowID
+					logger.Info(fmt.Sprintf("cancel [%s]", idCancel))
+					cancelSender(ctx, idCancel)
+				} else {
+					queuedWorkerId = senderWorkflowID
+				}
+				logger.Info(fmt.Sprintf("updated queuedWorkerId: [%v]", queuedWorkerId))
 			} else {
-				logger.Info("tryLock", "senderWorkflowID", senderWorkflowID)
+				logger.Info(fmt.Sprintf("tryLock [%s]", senderWorkflowID))
 				locked = true
 				tryLock(ctx, senderWorkflowID, unlockTimeout)
 				locked = false
+				logger.Info(fmt.Sprintf("lock freeed [%s]", senderWorkflowID))
 			}
 			goroutineCount--
 		})
 	}
 
 	// when mutex can exit
-	logger.Info("Start go routines")
 	workflow.Await(ctx, func() bool {
-		return goroutineCount == 0
+		return goroutineCount == 0 && queuedWorkerId == ""
 	})
 	return nil
 }
@@ -310,17 +339,20 @@ func SampleWorkflowWithMutex(
 	logger.Info("started", "currentWorkflowID", currentWorkflowID, "resourceID", resourceID)
 
 	mutex := NewMutex(currentWorkflowID, "TestUseCase")
-	unlockFunc, err := mutex.LockWithCancellation(ctx, resourceID, 10*time.Minute)
+	unlockFunc, err := mutex.LockWithCancellation(ctx, resourceID, 1*time.Minute)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if unlockFunc != nil {
+			unlockFunc()
+		}
+	}()
 
 	// emulate long running process
 	logger.Info("critical operation started")
 	_ = workflow.Sleep(ctx, 10*time.Minute)
 	logger.Info("critical operation finished")
-
-	_ = unlockFunc()
 
 	logger.Info("finished")
 	return nil

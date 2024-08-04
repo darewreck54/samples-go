@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 
-	"github.com/pborman/uuid"
 	"go.temporal.io/sdk/client"
 
 	"github.com/temporalio/samples-go/mutex"
@@ -21,40 +21,51 @@ func main() {
 	defer c.Close()
 
 	// This workflow ID can be user business logic identifier as well.
-	resourceID := uuid.New()
+	resourceID := "mutex_resource"
 	workflow1Options := client.StartWorkflowOptions{
-		ID:        "SampleWorkflow1WithMutex_" + uuid.New(),
+		ID:        "A",
 		TaskQueue: "mutex",
 	}
 
 	workflow2Options := client.StartWorkflowOptions{
-		ID:        "SampleWorkflow2WithMutex_" + uuid.New(),
+		ID:        "B",
 		TaskQueue: "mutex",
 	}
 
 	workflow3Options := client.StartWorkflowOptions{
-		ID:        "SampleWorkflow3WithMutex_" + uuid.New(),
+		ID:        "C",
+		TaskQueue: "mutex",
+	}
+
+	workflow4Options := client.StartWorkflowOptions{
+		ID:        "D",
 		TaskQueue: "mutex",
 	}
 
 	we, err := c.ExecuteWorkflow(context.Background(), workflow1Options, mutex.SampleWorkflowWithMutex, resourceID)
 	if err != nil {
-		log.Fatalln("Unable to execute workflow1", err)
+		log.Fatalln("Unable to execute workflow", err)
 	} else {
-		log.Println("Started workflow1", "WorkflowID", we.GetID(), "RunID", we.GetRunID())
+		log.Println(fmt.Sprintf("Started workflow [%s]", we.GetID()))
 	}
 
 	we, err = c.ExecuteWorkflow(context.Background(), workflow2Options, mutex.SampleWorkflowWithMutex, resourceID)
 	if err != nil {
-		log.Fatalln("Unable to execute workflow2", err)
+		log.Fatalln("Unable to execute workflow", err)
 	} else {
-		log.Println("Started workflow2", "WorkflowID", we.GetID(), "RunID", we.GetRunID())
+		log.Println(fmt.Sprintf("Started workflow [%s]", we.GetID()))
 	}
 
 	we, err = c.ExecuteWorkflow(context.Background(), workflow3Options, mutex.SampleWorkflowWithMutex, resourceID)
 	if err != nil {
-		log.Fatalln("Unable to execute workflow3", err)
+		log.Fatalln("Unable to execute workflow", err)
 	} else {
-		log.Println("Started workflow3", "WorkflowID", we.GetID(), "RunID", we.GetRunID())
+		log.Println(fmt.Sprintf("Started workflow [%s]", we.GetID()))
+	}
+	we, err = c.ExecuteWorkflow(context.Background(), workflow4Options, mutex.SampleWorkflowWithMutex, resourceID)
+	if err != nil {
+		log.Fatalln("Unable to execute workflow", err)
+	} else {
+		log.Println(fmt.Sprintf("Started workflow [%s]", we.GetID()))
 	}
 }
