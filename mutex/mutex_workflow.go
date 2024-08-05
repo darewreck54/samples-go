@@ -72,6 +72,7 @@ func (s *Mutex) LockWithCancellation(ctx workflow.Context,
 		isCanceled = true
 		workflow.GetLogger(ctx).Info("recieved cancel")
 	})
+
 	selector.Select(ctx)
 
 	if !isCanceled {
@@ -133,15 +134,18 @@ func MutexWorkflowWithCancellation(
 	requestLockCh := workflow.GetSignalChannel(ctx, RequestLockSignalName)
 	locked := false
 
+	goRoutineCount := 0
 	queuedIds := make([]string, 0)
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		for {
 			var senderWorkflowID string
 			if requestLockCh.Receive(ctx, &senderWorkflowID) {
+				goRoutineCount++
 				if locked {
 					// when locked, we only allow one queued item, and the rest is canceled
 					for _, id := range queuedIds {
 						cancelSender(ctx, id)
+						goRoutineCount--
 					}
 					queuedIds = make([]string, 0)
 				}
@@ -155,7 +159,6 @@ func MutexWorkflowWithCancellation(
 	// Since we are starting a go routine to listen to for "request-lock" signals, let's delay by a second
 	// Note sure if this is needed
 	workflow.Sleep(ctx, time.Second)
-
 	for {
 		if !locked {
 			logger.Info(fmt.Sprintf("Processing [%v]", queuedIds))
@@ -167,14 +170,15 @@ func MutexWorkflowWithCancellation(
 				queuedIds = make([]string, 0)
 				tryLock(ctx, id, unlockTimeout)
 				locked = false
+				goRoutineCount--
 			} else {
 				logger.Error("queue should never be more then 1")
 			}
 		}
 	}
 
-	workflow.AwaitWithTimeout(ctx, unlockTimeout, func() bool {
-		return len(queuedIds) == 0 && locked == false
+	workflow.Await(ctx, func() bool {
+		return goRoutineCount == 0
 	})
 
 	return nil
@@ -213,8 +217,17 @@ func tryLock(ctx workflow.Context, senderWorkflowID string, unlockTimeout time.D
 	}
 	logger.Info("signaled external workflow")
 	var ack string
-	workflow.GetSignalChannel(ctx, releaseLockChannelName).ReceiveWithTimeout(ctx, unlockTimeout, &ack)
+	ok, _ := workflow.GetSignalChannel(ctx, releaseLockChannelName).ReceiveWithTimeout(ctx, unlockTimeout,
+		&ack)
 	logger.Info("release signal received: " + ack)
+	if !ok {
+		// mutex canceled so lets cancel the workflow
+		err = workflow.RequestCancelExternalWorkflow(ctx, senderWorkflowID, "").Get(ctx, nil)
+		if err != nil {
+			logger.Error(fmt.Sprintf("failed to cancel workflow [%s]", senderWorkflowID), "error", err)
+		}
+	}
+
 }
 
 // MutexWorkflow used for locking a resource
@@ -354,7 +367,7 @@ func SampleWorkflowWithMutex(
 
 	// emulate long running process
 	logger.Info("critical operation started")
-	_ = workflow.Sleep(ctx, 10*time.Minute)
+	_ = workflow.Sleep(ctx, 3*time.Minute)
 	logger.Info("critical operation finished")
 
 	logger.Info("finished")
