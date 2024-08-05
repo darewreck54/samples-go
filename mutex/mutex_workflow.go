@@ -368,15 +368,18 @@ func SampleWorkflowWithMutex(
 	logger.Info("critical operation started")
 	selector := workflow.NewSelector(ctx)
 
-	selector.AddFuture(workflow.NewTimer(ctx, 5*time.Minute), func(f workflow.Future) {
-		logger.Info("unlockTimeout exceeded")
+	timerCtx := ctx
+	isCanceled := false
+	selector.AddFuture(workflow.NewTimer(timerCtx, 5*time.Minute), func(f workflow.Future) {
+		logger.Info(fmt.Sprintf("%v", timerCtx))
+		timerErr := f.Get(timerCtx, nil)
+		if temporal.IsCanceledError(timerErr) {
+			isCanceled = true
+		} else {
+			logger.Info("unlockTimeout exceeded")
+		}
 	})
 
-	isCanceled := false
-	selector.AddReceive(ctx.Done(), func(c workflow.ReceiveChannel, more bool) {
-		logger.Info("cancel request made")
-		isCanceled = true
-	})
 	selector.Select(ctx)
 
 	if isCanceled {
