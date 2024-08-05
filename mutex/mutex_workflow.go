@@ -365,9 +365,24 @@ func SampleWorkflowWithMutex(
 		}
 	}()
 
-	// emulate long running process
 	logger.Info("critical operation started")
-	_ = workflow.Sleep(ctx, 3*time.Minute)
+	selector := workflow.NewSelector(ctx)
+
+	selector.AddFuture(workflow.NewTimer(ctx, 5*time.Minute), func(f workflow.Future) {
+		logger.Info("unlockTimeout exceeded")
+	})
+
+	isCanceled := false
+	selector.AddReceive(ctx.Done(), func(c workflow.ReceiveChannel, more bool) {
+		logger.Info("cancel request made")
+		isCanceled = true
+	})
+	selector.Select(ctx)
+
+	if isCanceled {
+		return temporal.NewCanceledError("workflow canceled")
+	}
+
 	logger.Info("critical operation finished")
 
 	logger.Info("finished")
