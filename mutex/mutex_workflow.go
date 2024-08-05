@@ -133,7 +133,6 @@ func MutexWorkflowWithCancellation(
 	requestLockCh := workflow.GetSignalChannel(ctx, RequestLockSignalName)
 	locked := false
 
-	//goroutineCount := 0
 	queuedIds := make([]string, 0)
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		for {
@@ -153,6 +152,8 @@ func MutexWorkflowWithCancellation(
 		}
 	})
 
+	// Since we are starting a go routine to listen to for "request-lock" signals, let's delay by a second
+	// Note sure if this is needed
 	workflow.Sleep(ctx, time.Second)
 
 	for {
@@ -172,17 +173,9 @@ func MutexWorkflowWithCancellation(
 		}
 	}
 
-	workflow.Await(ctx, func() bool {
+	workflow.AwaitWithTimeout(ctx, unlockTimeout, func() bool {
 		return len(queuedIds) == 0 && locked == false
 	})
-	/*
-		selector := workflow.NewSelector(ctx)
-
-		selector.AddFuture(workflow.NewTimer(ctx, 20*time.Minute), func(f workflow.Future) {
-			logger.Info("unlockTimeout exceeded")
-		})
-		selector.Select(ctx)
-	*/
 
 	return nil
 }
