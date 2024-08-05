@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"go.temporal.io/sdk/client"
 
@@ -41,7 +42,6 @@ func main() {
 		ID:        "D",
 		TaskQueue: "mutex",
 	}
-
 	we, err := c.ExecuteWorkflow(context.Background(), workflow1Options, mutex.SampleWorkflowWithMutex, resourceID)
 	if err != nil {
 		log.Fatalln("Unable to execute workflow", err)
@@ -49,19 +49,22 @@ func main() {
 		log.Println(fmt.Sprintf("Started workflow [%s]", we.GetID()))
 	}
 
+	time.Sleep(2 * time.Second)
 	we, err = c.ExecuteWorkflow(context.Background(), workflow2Options, mutex.SampleWorkflowWithMutex, resourceID)
 	if err != nil {
 		log.Fatalln("Unable to execute workflow", err)
 	} else {
 		log.Println(fmt.Sprintf("Started workflow [%s]", we.GetID()))
 	}
-
+	time.Sleep(2 * time.Second)
 	we, err = c.ExecuteWorkflow(context.Background(), workflow3Options, mutex.SampleWorkflowWithMutex, resourceID)
 	if err != nil {
 		log.Fatalln("Unable to execute workflow", err)
 	} else {
 		log.Println(fmt.Sprintf("Started workflow [%s]", we.GetID()))
 	}
+
+	time.Sleep(2 * time.Second)
 	we, err = c.ExecuteWorkflow(context.Background(), workflow4Options, mutex.SampleWorkflowWithMutex, resourceID)
 	if err != nil {
 		log.Fatalln("Unable to execute workflow", err)
